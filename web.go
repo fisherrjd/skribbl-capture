@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -25,6 +26,7 @@ var (
 type DeviceInfo struct {
 	Index int    `json:"index"`
 	Name  string `json:"name"`
+	Type  string `json:"type"` // "capture" or "loopback"
 }
 
 // RecordingStatus represents the current recording state
@@ -56,18 +58,36 @@ func initWebServer() error {
 
 // Handler: GET /api/devices - List all available capture devices
 func handleListDevices(w http.ResponseWriter, r *http.Request) {
-	infos, err := malgoContext.Devices(malgo.Capture)
+	devices := []DeviceInfo{}
+
+	// List capture devices (microphones, virtual inputs)
+	captureInfos, err := malgoContext.Devices(malgo.Capture)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get devices: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to get capture devices: %v", err), http.StatusInternalServerError)
 		return
 	}
-
-	devices := []DeviceInfo{}
-	for i, info := range infos {
+	for i, info := range captureInfos {
 		devices = append(devices, DeviceInfo{
 			Index: i,
 			Name:  info.Name(),
+			Type:  "capture",
 		})
+	}
+
+	// On Windows, also list playback devices as loopback sources
+	if runtime.GOOS == "windows" {
+		playbackInfos, err := malgoContext.Devices(malgo.Playback)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get playback devices: %v", err), http.StatusInternalServerError)
+			return
+		}
+		for i, info := range playbackInfos {
+			devices = append(devices, DeviceInfo{
+				Index: len(captureInfos) + i,
+				Name:  info.Name(),
+				Type:  "loopback",
+			})
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -114,11 +134,27 @@ func handleStartRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all available devices
-	infos, err := malgoContext.Devices(malgo.Capture)
+	// Build unified device list (capture + loopback on Windows)
+	allDevices := []selectableDevice{}
+
+	captureInfos, err := malgoContext.Devices(malgo.Capture)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get devices: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to get capture devices: %v", err), http.StatusInternalServerError)
 		return
+	}
+	for _, info := range captureInfos {
+		allDevices = append(allDevices, selectableDevice{info: info, isLoopback: false})
+	}
+
+	if runtime.GOOS == "windows" {
+		playbackInfos, err := malgoContext.Devices(malgo.Playback)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get playback devices: %v", err), http.StatusInternalServerError)
+			return
+		}
+		for _, info := range playbackInfos {
+			allDevices = append(allDevices, selectableDevice{info: info, isLoopback: true})
+		}
 	}
 
 	// Set up capture for each selected device
@@ -126,12 +162,13 @@ func handleStartRecording(w http.ResponseWriter, r *http.Request) {
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 
 	for _, idx := range req.DeviceIndices {
-		if idx < 0 || idx >= len(infos) {
+		if idx < 0 || idx >= len(allDevices) {
 			http.Error(w, fmt.Sprintf("Invalid device index: %d", idx), http.StatusBadRequest)
 			return
 		}
 
-		deviceInfo := infos[idx]
+		selected := allDevices[idx]
+		deviceInfo := selected.info
 		deviceName := deviceInfo.Name()
 
 		// Create filename with timestamp
@@ -139,7 +176,12 @@ func handleStartRecording(w http.ResponseWriter, r *http.Request) {
 		fullPath := filepath.Join(outputDirectory, safeFilename)
 
 		// Configure the audio capture settings
-		deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
+		// Use Loopback mode for playback devices on Windows, Capture for regular mics
+		deviceType := malgo.Capture
+		if selected.isLoopback {
+			deviceType = malgo.Loopback
+		}
+		deviceConfig := malgo.DefaultDeviceConfig(deviceType)
 		deviceConfig.Capture.Format = malgo.FormatS16
 		deviceConfig.Capture.Channels = 1
 		deviceConfig.SampleRate = 44100

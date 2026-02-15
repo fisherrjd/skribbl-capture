@@ -6,11 +6,19 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/gen2brain/malgo"
 )
+
+// selectableDevice represents a device the user can pick, which may be
+// either a regular capture device or a loopback (playback) device.
+type selectableDevice struct {
+	info       malgo.DeviceInfo
+	isLoopback bool
+}
 
 // writeWAVHeader writes the WAV file header
 // sampleRate: samples per second (e.g., 44100)
@@ -112,19 +120,40 @@ func runCLI() {
 	fmt.Println("Audio context initialized successfully!")
 
 	// Step 2: List all available audio devices
-	// We'll look for "capture" devices (microphones, system audio inputs)
-	fmt.Println("\n=== Available Capture Devices ===")
+	fmt.Println("\n=== Available Devices ===")
 
-	// Get list of all playback and capture devices
-	infos, err := ctx.Devices(malgo.Capture)
+	// Build a unified list of selectable devices
+	allDevices := []selectableDevice{}
+
+	// Get capture devices (microphones, virtual inputs)
+	captureInfos, err := ctx.Devices(malgo.Capture)
 	if err != nil {
-		fmt.Printf("Failed to get devices: %v\n", err)
+		fmt.Printf("Failed to get capture devices: %v\n", err)
 		return
 	}
+	for _, info := range captureInfos {
+		allDevices = append(allDevices, selectableDevice{info: info, isLoopback: false})
+	}
 
-	// Loop through and print each device
-	for i, info := range infos {
-		fmt.Printf("[%d] %s\n", i, info.Name())
+	// On Windows, also list playback devices as loopback sources (system audio)
+	if runtime.GOOS == "windows" {
+		playbackInfos, err := ctx.Devices(malgo.Playback)
+		if err != nil {
+			fmt.Printf("Failed to get playback devices: %v\n", err)
+			return
+		}
+		for _, info := range playbackInfos {
+			allDevices = append(allDevices, selectableDevice{info: info, isLoopback: true})
+		}
+	}
+
+	// Print all devices
+	for i, d := range allDevices {
+		label := ""
+		if d.isLoopback {
+			label = " [Loopback]"
+		}
+		fmt.Printf("[%d] %s%s\n", i, d.info.Name(), label)
 	}
 
 	// Step 3: Ask user to select devices (comma-separated for multiple)
@@ -149,8 +178,8 @@ func runCLI() {
 			fmt.Printf("That's not a valid number: %s\n", part)
 			return
 		}
-		if deviceIndex < 0 || deviceIndex >= len(infos) {
-			fmt.Printf("Invalid device! Please choose 0-%d\n", len(infos)-1)
+		if deviceIndex < 0 || deviceIndex >= len(allDevices) {
+			fmt.Printf("Invalid device! Please choose 0-%d\n", len(allDevices)-1)
 			return
 		}
 		selectedIndices = append(selectedIndices, deviceIndex)
@@ -165,7 +194,8 @@ func runCLI() {
 	captures := []*captureDevice{}
 
 	for _, idx := range selectedIndices {
-		deviceInfo := infos[idx]
+		selected := allDevices[idx]
+		deviceInfo := selected.info
 		deviceName := deviceInfo.Name()
 		fmt.Printf("\nSetting up: %s\n", deviceName)
 
@@ -173,10 +203,15 @@ func runCLI() {
 		safeFilename := strings.ReplaceAll(strings.ToLower(deviceName), " ", "_") + ".wav"
 
 		// Configure the audio capture settings
-		deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
+		// Use Loopback mode for playback devices on Windows, Capture for regular mics
+		deviceType := malgo.Capture
+		if selected.isLoopback {
+			deviceType = malgo.Loopback
+		}
+		deviceConfig := malgo.DefaultDeviceConfig(deviceType)
 		deviceConfig.Capture.Format = malgo.FormatS16 // 16-bit audio samples
 		deviceConfig.Capture.Channels = 1             // Mono (single channel audio)
-		deviceConfig.SampleRate = 44100                // 44,100 samples per second (CD quality)
+		deviceConfig.SampleRate = 44100               // 44,100 samples per second (CD quality)
 		deviceConfig.Capture.DeviceID = deviceInfo.ID.Pointer()
 
 		// Create a file for this device
