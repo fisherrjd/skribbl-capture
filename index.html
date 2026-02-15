@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skribbl Audio Capture</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+        }
+
+        .section h2 {
+            color: #444;
+            font-size: 18px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 8px;
+        }
+
+        .device-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .device-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+
+        .device-item:hover {
+            background: #e9ecef;
+        }
+
+        .device-item input[type="checkbox"] {
+            margin-right: 12px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .device-item label {
+            cursor: pointer;
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-start {
+            background: #10b981;
+            color: white;
+        }
+
+        .btn-start:hover:not(:disabled) {
+            background: #059669;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+        .btn-stop {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-stop:hover:not(:disabled) {
+            background: #dc2626;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+        }
+
+        .status {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .status.idle {
+            background: #e0e7ff;
+            color: #3730a3;
+        }
+
+        .status.recording {
+            background: #dcfce7;
+            color: #166534;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .recording-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #ef4444;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .recordings-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .recording-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .recording-info {
+            flex: 1;
+        }
+
+        .recording-name {
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+
+        .recording-meta {
+            color: #666;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .btn-download {
+            background: #667eea;
+            color: white;
+            padding: 8px 16px;
+            font-size: 14px;
+            text-decoration: none;
+            border-radius: 6px;
+        }
+
+        .btn-download:hover {
+            background: #5568d3;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Skribbl Audio Capture</h1>
+        <p class="subtitle">Record multiple audio devices simultaneously</p>
+
+        <div id="error" class="error"></div>
+
+        <div id="status" class="status idle">
+            Ready to record
+        </div>
+
+        <div class="section">
+            <h2>Select Audio Devices</h2>
+            <div id="deviceList" class="device-list">
+                <div class="empty-state">Loading devices...</div>
+            </div>
+            <div class="controls">
+                <button id="startBtn" class="btn-start" onclick="startRecording()">Start Recording</button>
+                <button id="stopBtn" class="btn-stop" onclick="stopRecording()" disabled>Stop Recording</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Recordings</h2>
+            <div id="recordingsList" class="recordings-list">
+                <div class="empty-state">No recordings yet</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isRecording = false;
+
+        // Load devices on page load
+        async function loadDevices() {
+            try {
+                const response = await fetch('/api/devices');
+                const devices = await response.json();
+
+                const deviceList = document.getElementById('deviceList');
+                if (devices.length === 0) {
+                    deviceList.innerHTML = '<div class="empty-state">No audio devices found</div>';
+                    return;
+                }
+
+                deviceList.innerHTML = devices.map(device => `
+                    <div class="device-item">
+                        <input type="checkbox" id="device-${device.index}" value="${device.index}">
+                        <label for="device-${device.index}">${device.name}</label>
+                    </div>
+                `).join('');
+            } catch (error) {
+                showError('Failed to load devices: ' + error.message);
+            }
+        }
+
+        // Start recording
+        async function startRecording() {
+            const checkboxes = document.querySelectorAll('#deviceList input[type="checkbox"]:checked');
+            const deviceIndices = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+            if (deviceIndices.length === 0) {
+                showError('Please select at least one device');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ deviceIndices })
+                });
+
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                isRecording = true;
+                updateUI();
+                hideError();
+            } catch (error) {
+                showError('Failed to start recording: ' + error.message);
+            }
+        }
+
+        // Stop recording
+        async function stopRecording() {
+            try {
+                const response = await fetch('/api/stop', { method: 'POST' });
+
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                isRecording = false;
+                updateUI();
+                loadRecordings();
+                hideError();
+            } catch (error) {
+                showError('Failed to stop recording: ' + error.message);
+            }
+        }
+
+        // Load recordings list
+        async function loadRecordings() {
+            try {
+                const response = await fetch('/api/recordings');
+                const recordings = await response.json();
+
+                const recordingsList = document.getElementById('recordingsList');
+
+                if (recordings.length === 0) {
+                    recordingsList.innerHTML = '<div class="empty-state">No recordings yet</div>';
+                    return;
+                }
+
+                recordingsList.innerHTML = recordings.map(rec => `
+                    <div class="recording-item">
+                        <div class="recording-info">
+                            <div class="recording-name">${rec.name}</div>
+                            <div class="recording-meta">${formatBytes(rec.size)} • ${rec.time}</div>
+                        </div>
+                        <a href="/recordings/${rec.name}" class="btn-download" download>Download</a>
+                    </div>
+                `).join('');
+            } catch (error) {
+                showError('Failed to load recordings: ' + error.message);
+            }
+        }
+
+        // Update UI based on recording state
+        function updateUI() {
+            const statusDiv = document.getElementById('status');
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+
+            if (isRecording) {
+                statusDiv.className = 'status recording';
+                statusDiv.innerHTML = '<span class="recording-indicator"></span>Recording in progress...';
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else {
+                statusDiv.className = 'status idle';
+                statusDiv.innerHTML = 'Ready to record';
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+
+        // Show error message
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.classList.add('show');
+        }
+
+        // Hide error message
+        function hideError() {
+            const errorDiv = document.getElementById('error');
+            errorDiv.classList.remove('show');
+        }
+
+        // Format bytes to human-readable
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // Initialize
+        loadDevices();
+        loadRecordings();
+
+        // Refresh recordings every 5 seconds if not recording
+        setInterval(() => {
+            if (!isRecording) {
+                loadRecordings();
+            }
+        }, 5000);
+    </script>
+</body>
+</html>

@@ -1,12 +1,13 @@
 package main
 
 import (
-	"fmt"
 	"bufio"
+	"encoding/binary"
+	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"encoding/binary"
 
 	"github.com/gen2brain/malgo"
 )
@@ -25,13 +26,13 @@ func writeWAVHeader(file *os.File, sampleRate, channels, bitsPerSample, dataSize
 
 	// "fmt " sub-chunk (format)
 	file.WriteString("fmt ")
-	binary.Write(file, binary.LittleEndian, uint32(16))          // Subchunk size
-	binary.Write(file, binary.LittleEndian, uint16(1))           // Audio format (1 = PCM)
-	binary.Write(file, binary.LittleEndian, uint16(channels))    // Number of channels
-	binary.Write(file, binary.LittleEndian, sampleRate)          // Sample rate
+	binary.Write(file, binary.LittleEndian, uint32(16))                          // Subchunk size
+	binary.Write(file, binary.LittleEndian, uint16(1))                           // Audio format (1 = PCM)
+	binary.Write(file, binary.LittleEndian, uint16(channels))                    // Number of channels
+	binary.Write(file, binary.LittleEndian, sampleRate)                          // Sample rate
 	binary.Write(file, binary.LittleEndian, sampleRate*channels*bitsPerSample/8) // Byte rate
 	binary.Write(file, binary.LittleEndian, uint16(channels*bitsPerSample/8))    // Block align
-	binary.Write(file, binary.LittleEndian, uint16(bitsPerSample)) // Bits per sample
+	binary.Write(file, binary.LittleEndian, uint16(bitsPerSample))               // Bits per sample
 
 	// "data" sub-chunk
 	file.WriteString("data")
@@ -40,7 +41,63 @@ func writeWAVHeader(file *os.File, sampleRate, channels, bitsPerSample, dataSize
 	return nil
 }
 
+// captureDevice holds all the state for a single audio capture device
+type captureDevice struct {
+	name              string
+	file              *os.File
+	filename          string
+	device            *malgo.Device
+	totalBytesWritten uint32
+}
+
 func main() {
+	// Check if web mode is requested
+	if len(os.Args) > 1 && os.Args[1] == "web" {
+		runWebServer()
+		return
+	}
+
+	// Run CLI mode
+	runCLI()
+}
+
+func runWebServer() {
+	fmt.Println("🎙️  Skribbl Audio Capture - Web Mode")
+
+	if err := initWebServer(); err != nil {
+		fmt.Printf("Failed to initialize web server: %v\n", err)
+		return
+	}
+	defer malgoContext.Uninit()
+
+	// Serve static files
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, "index.html")
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	// API routes
+	http.HandleFunc("/api/devices", handleListDevices)
+	http.HandleFunc("/api/status", handleStatus)
+	http.HandleFunc("/api/start", handleStartRecording)
+	http.HandleFunc("/api/stop", handleStopRecording)
+	http.HandleFunc("/api/recordings", handleListRecordings)
+	http.HandleFunc("/recordings/", handleDownloadRecording)
+
+	port := "8080"
+	fmt.Printf("\n✓ Server running at http://localhost:%s\n", port)
+	fmt.Println("✓ Open your browser to start recording!")
+	fmt.Println("\nPress Ctrl+C to stop the server")
+
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		fmt.Printf("Failed to start server: %v\n", err)
+	}
+}
+
+func runCLI() {
 	fmt.Println("Skribbl Audio Capture")
 
 	// Step 1: Initialize the malgo context
@@ -70,8 +127,8 @@ func main() {
 		fmt.Printf("[%d] %s\n", i, info.Name())
 	}
 
-	// Step 3: Ask user to select a device
-	fmt.Println("\nEnter device number:")
+	// Step 3: Ask user to select devices (comma-separated for multiple)
+	fmt.Println("\nEnter device number(s) to capture from (comma-separated for multiple, e.g., 1,2):")
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
@@ -82,98 +139,116 @@ func main() {
 	// Clean up the input (removes the newline character and any spaces)
 	input = strings.TrimSpace(input)
 
-	// Convert the text string to a number
-	deviceIndex, err := strconv.Atoi(input)
-	if err != nil {
-		fmt.Printf("That's not a valid number: %v\n", err)
-		return
-	}
-
-	// Make sure the number is within the valid range
-	if deviceIndex < 0 || deviceIndex >= len(infos) {
-		fmt.Printf("Invalid device! Please choose 0-%d\n", len(infos)-1)
-		return
-	}
-
-	// Get the device from our array
-	selectedDevice := infos[deviceIndex]
-	fmt.Printf("✓ You selected: %s\n", selectedDevice.Name())
-
-	// Step 4: Configure the audio capture settings
-	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
-	deviceConfig.Capture.Format = malgo.FormatS16       // 16-bit audio samples
-	deviceConfig.Capture.Channels = 1                    // Mono (single channgel audio))
-	deviceConfig.SampleRate = 44100                      // 44,100 samples per second (CD quality)
-	deviceConfig.Capture.DeviceID = selectedDevice.ID.Pointer()  // Tell it which device to use
-
-	fmt.Printf("Configured for %d Hz, %d channels\n", deviceConfig.SampleRate, deviceConfig.Capture.Channels)
-
-	// Step 5: Create a file to save the audio
-	outputFile, err := os.Create("recording.wav")
-	if err != nil {
-		fmt.Printf("Failed to create output file: %v\n", err)
-		return
-	}
-	defer outputFile.Close()  // Make sure we close the file when done
-
-	// Write the WAV header (with dataSize = 0 for now, we'll update it later)
-	err = writeWAVHeader(outputFile, deviceConfig.SampleRate, uint32(deviceConfig.Capture.Channels), 16, 0)
-	if err != nil {
-		fmt.Printf("Failed to write WAV header: %v\n", err)
-		return
-	}
-
-	fmt.Println("✓ Created recording.wav with WAV header")
-
-	// Track how much audio data we write
-	var totalBytesWritten uint32 = 0
-
-	// Step 6: Define the callback function (now we have access to outputFile!)
-	onRecvFrames := func(pSample2, pSample []byte, framecount uint32) {
-		// Write the raw audio data directly to the file
-		n, err := outputFile.Write(pSample)
+	// Parse each comma-separated value into device indices
+	parts := strings.Split(input, ",")
+	selectedIndices := []int{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		deviceIndex, err := strconv.Atoi(part)
 		if err != nil {
-			fmt.Printf("Error writing audio data: %v\n", err)
+			fmt.Printf("That's not a valid number: %s\n", part)
+			return
 		}
-		totalBytesWritten += uint32(n)  // Keep track of total bytes
-		fmt.Printf("📊 Wrote %d bytes to file (total: %d)\n", len(pSample), totalBytesWritten)
+		if deviceIndex < 0 || deviceIndex >= len(infos) {
+			fmt.Printf("Invalid device! Please choose 0-%d\n", len(infos)-1)
+			return
+		}
+		selectedIndices = append(selectedIndices, deviceIndex)
 	}
 
-	// Step 7: Initialize the device with our config and callback
-	device, err := malgo.InitDevice(ctx.Context, deviceConfig, malgo.DeviceCallbacks{
-		Data: onRecvFrames,  // Tell it to call our function when data arrives
-	})
-	if err != nil {
-		fmt.Printf("Failed to initialize device: %v\n", err)
-		return
-	}
-	defer device.Uninit()  // Make sure we clean up when done
-
-	fmt.Println("✓ Device initialized!")
-
-	// Step 8: Start capturing audio!
-	err = device.Start()
-	if err != nil {
-		fmt.Printf("Failed to start device: %v\n", err)
+	if len(selectedIndices) == 0 {
+		fmt.Println("No devices selected!")
 		return
 	}
 
-	fmt.Println("🎙️  Recording... Press Enter to stop")
-	reader.ReadString('\n')  // Wait for user to press Enter
+	// Step 4: Set up capture for each selected device
+	captures := []*captureDevice{}
 
-	fmt.Println("Recording stopped!")
+	for _, idx := range selectedIndices {
+		deviceInfo := infos[idx]
+		deviceName := deviceInfo.Name()
+		fmt.Printf("\nSetting up: %s\n", deviceName)
 
-	// Step 9: Update the WAV header with the correct file size
-	// Go back to the beginning of the file
-	outputFile.Seek(0, 0)
+		// Create a safe filename from the device name (replace spaces with underscores)
+		safeFilename := strings.ReplaceAll(strings.ToLower(deviceName), " ", "_") + ".wav"
 
-	// Rewrite the header with the actual data size
-	err = writeWAVHeader(outputFile, deviceConfig.SampleRate, uint32(deviceConfig.Capture.Channels), 16, totalBytesWritten)
-	if err != nil {
-		fmt.Printf("Failed to update WAV header: %v\n", err)
-		return
+		// Configure the audio capture settings
+		deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
+		deviceConfig.Capture.Format = malgo.FormatS16 // 16-bit audio samples
+		deviceConfig.Capture.Channels = 1             // Mono (single channel audio)
+		deviceConfig.SampleRate = 44100                // 44,100 samples per second (CD quality)
+		deviceConfig.Capture.DeviceID = deviceInfo.ID.Pointer()
+
+		// Create a file for this device
+		outputFile, err := os.Create(safeFilename)
+		if err != nil {
+			fmt.Printf("Failed to create output file for %s: %v\n", deviceName, err)
+			return
+		}
+
+		// Write the WAV header (with dataSize = 0 for now, we'll update it later)
+		err = writeWAVHeader(outputFile, deviceConfig.SampleRate, uint32(deviceConfig.Capture.Channels), 16, 0)
+		if err != nil {
+			fmt.Printf("Failed to write WAV header for %s: %v\n", deviceName, err)
+			return
+		}
+
+		// Create a captureDevice to track this device's state
+		cap := &captureDevice{
+			name: deviceName,
+			file: outputFile,
+		}
+		captures = append(captures, cap)
+
+		// Define the callback for this device
+		// Each device gets its own callback that writes to its own file
+		onRecvFrames := func(pSample2, pSample []byte, framecount uint32) {
+			n, err := cap.file.Write(pSample)
+			if err != nil {
+				fmt.Printf("Error writing audio data for %s: %v\n", cap.name, err)
+			}
+			cap.totalBytesWritten += uint32(n)
+		}
+
+		// Initialize the device with our config and callback
+		device, err := malgo.InitDevice(ctx.Context, deviceConfig, malgo.DeviceCallbacks{
+			Data: onRecvFrames,
+		})
+		if err != nil {
+			fmt.Printf("Failed to initialize device %s: %v\n", deviceName, err)
+			return
+		}
+		cap.device = device
+
+		fmt.Printf("✓ %s → %s\n", deviceName, safeFilename)
 	}
 
-	fmt.Printf("✓ Updated header with %d bytes of audio data\n", totalBytesWritten)
-	fmt.Println("✓ Recording saved to recording.wav")
+	// Step 5: Start all devices
+	for _, cap := range captures {
+		err := cap.device.Start()
+		if err != nil {
+			fmt.Printf("Failed to start device %s: %v\n", cap.name, err)
+			return
+		}
+		fmt.Printf("🎙️  Started recording: %s\n", cap.name)
+	}
+
+	fmt.Println("\nPress Enter to stop recording...")
+	reader.ReadString('\n')
+
+	fmt.Println("\nRecording stopped!")
+
+	// Step 6: Clean up - stop devices, update WAV headers, close files
+	for _, cap := range captures {
+		cap.device.Uninit()
+
+		// Go back to the beginning of the file and rewrite the header with correct size
+		cap.file.Seek(0, 0)
+		writeWAVHeader(cap.file, 44100, 1, 16, cap.totalBytesWritten)
+		cap.file.Close()
+
+		fmt.Printf("✓ Saved %s (%d bytes of audio)\n", cap.name, cap.totalBytesWritten)
+	}
+
+	fmt.Println("✓ All recordings saved!")
 }
