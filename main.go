@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -42,13 +43,61 @@ func writeWAVHeader(file *os.File, sampleRate, channels, bitsPerSample, dataSize
 
 // captureDevice holds all the state for a single audio capture device
 type captureDevice struct {
-	name             string
-	file             *os.File
-	device           *malgo.Device
+	name              string
+	file              *os.File
+	filename          string
+	device            *malgo.Device
 	totalBytesWritten uint32
 }
 
 func main() {
+	// Check if web mode is requested
+	if len(os.Args) > 1 && os.Args[1] == "web" {
+		runWebServer()
+		return
+	}
+
+	// Run CLI mode
+	runCLI()
+}
+
+func runWebServer() {
+	fmt.Println("🎙️  Skribbl Audio Capture - Web Mode")
+
+	if err := initWebServer(); err != nil {
+		fmt.Printf("Failed to initialize web server: %v\n", err)
+		return
+	}
+	defer malgoContext.Uninit()
+
+	// Serve static files
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, "index.html")
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+
+	// API routes
+	http.HandleFunc("/api/devices", handleListDevices)
+	http.HandleFunc("/api/status", handleStatus)
+	http.HandleFunc("/api/start", handleStartRecording)
+	http.HandleFunc("/api/stop", handleStopRecording)
+	http.HandleFunc("/api/recordings", handleListRecordings)
+	http.HandleFunc("/recordings/", handleDownloadRecording)
+
+	port := "8080"
+	fmt.Printf("\n✓ Server running at http://localhost:%s\n", port)
+	fmt.Println("✓ Open your browser to start recording!")
+	fmt.Println("\nPress Ctrl+C to stop the server")
+
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		fmt.Printf("Failed to start server: %v\n", err)
+	}
+}
+
+func runCLI() {
 	fmt.Println("Skribbl Audio Capture")
 
 	// Step 1: Initialize the malgo context
